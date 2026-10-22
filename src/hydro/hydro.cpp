@@ -663,6 +663,10 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
     } else if (resistivity_str != "none") {
       PARTHENON_FAIL("Unknown resistivity method. Options are: none, ohmic");
     }
+    if (UsesCT(fluid) && resistivity != Resistivity::none) {
+      PARTHENON_FAIL("Magnetic diffusion is not supported with hydro/fluid = ctmhd. "
+                     "Use hydro/fluid = glmmhd for magnetic diffusion.");
+    }
     // If resistivity is enabled, process supported coefficients
     if (resistivity != Resistivity::none) {
       auto resistivity_coeff_str =
