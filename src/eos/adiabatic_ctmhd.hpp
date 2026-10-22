@@ -32,10 +32,10 @@ class AdiabaticCTMHDEOS : public EquationOfState {
     return std::sqrt(0.5 * (qsq + std::sqrt(tmp * tmp + 4.0 * asq * ct2)) / d);
   }
 
-  template <typename View4D>
-  KOKKOS_INLINE_FUNCTION void ConsToPrim(View4D cons, View4D prim, const int &nhydro,
-                                         const int &nscalars, const int &k, const int &j,
-                                         const int &i) const {
+  template <typename View4D, typename BccView>
+  KOKKOS_INLINE_FUNCTION void ConsToPrim(View4D cons, View4D prim, BccView bcc,
+                                         const int &nhydro, const int &nscalars,
+                                         const int &k, const int &j, const int &i) const {
     const Real gm1 = gamma_ - 1.0;
     const Real density_floor = GetDensityFloor();
     const Real pressure_floor = GetPressureFloor();
@@ -48,15 +48,17 @@ class AdiabaticCTMHDEOS : public EquationOfState {
     Real &u_m2 = cons(IM2, k, j, i);
     Real &u_m3 = cons(IM3, k, j, i);
     Real &u_e = cons(IEN, k, j, i);
-    Real &u_b1 = cons(IB1, k, j, i);
-    Real &u_b2 = cons(IB2, k, j, i);
-    Real &u_b3 = cons(IB3, k, j, i);
-
     Real &w_d = prim(IDN, k, j, i);
     Real &w_vx = prim(IV1, k, j, i);
     Real &w_vy = prim(IV2, k, j, i);
     Real &w_vz = prim(IV3, k, j, i);
     Real &w_p = prim(IPR, k, j, i);
+    const Real b1 = bcc(0, k, j, i);
+    const Real b2 = bcc(1, k, j, i);
+    const Real b3 = bcc(2, k, j, i);
+    cons(IB1, k, j, i) = b1;
+    cons(IB2, k, j, i) = b2;
+    cons(IB3, k, j, i) = b3;
     Real &w_Bx = prim(IB1, k, j, i);
     Real &w_By = prim(IB2, k, j, i);
     Real &w_Bz = prim(IB3, k, j, i);
@@ -70,12 +72,12 @@ class AdiabaticCTMHDEOS : public EquationOfState {
     w_vx = u_m1 * di;
     w_vy = u_m2 * di;
     w_vz = u_m3 * di;
-    w_Bx = u_b1;
-    w_By = u_b2;
-    w_Bz = u_b3;
+    w_Bx = b1;
+    w_By = b2;
+    w_Bz = b3;
 
     Real e_k = 0.5 * di * (SQR(u_m1) + SQR(u_m2) + SQR(u_m3));
-    const Real e_B = 0.5 * (SQR(u_b1) + SQR(u_b2) + SQR(u_b3));
+    const Real e_B = 0.5 * (SQR(b1) + SQR(b2) + SQR(b3));
     w_p = gm1 * (u_e - e_k - e_B);
 
     const Real w_v2 = SQR(w_vx) + SQR(w_vy) + SQR(w_vz);

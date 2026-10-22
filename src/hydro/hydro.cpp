@@ -15,6 +15,7 @@
 
 // AthenaPK headers
 #include "../eos/adiabatic_glmmhd.hpp"
+#include "../eos/adiabatic_ctmhd.hpp"
 #include "../eos/adiabatic_hydro.hpp"
 #include "../main.hpp"
 #include "../pgen/pgen.hpp"
@@ -31,6 +32,7 @@
 #include "diffusion/diffusion.hpp"
 #include "glmmhd/glmmhd.hpp"
 #include "hydro.hpp"
+#include "ctmhd/ct_update.hpp"
 #include "interface/params.hpp"
 #include "outputs/outputs.hpp"
 #include "prolongation/custom_ops.hpp"
@@ -51,6 +53,7 @@ namespace Hydro {
 
 using cooling::TabularCooling;
 using parthenon::HistoryOutputVar;
+using parthenon::TopologicalElement;
 
 parthenon::Packages_t ProcessPackages(std::unique_ptr<ParameterInput> &pin) {
   parthenon::Packages_t packages;
@@ -142,9 +145,81 @@ void PreStepMeshUserWorkInLoop(Mesh *pmesh, ParameterInput *pin, SimTime &tm) {
   }
 }
 
+template <Hst hst>
+Real CTHydroHst(MeshData<Real> *md) {
+  const auto face_b = md->PackVariables(std::vector<std::string>{"ct_b"});
+  const auto bcc = md->PackVariables(std::vector<std::string>{"ct_bcc"});
+  const auto ib = md->GetBlockData(0)->GetBoundsI(IndexDomain::interior);
+  const auto jb = md->GetBlockData(0)->GetBoundsJ(IndexDomain::interior);
+  const auto kb = md->GetBlockData(0)->GetBoundsK(IndexDomain::interior);
+  const int ndim = md->GetMeshPointer()->ndim;
+  Real sum = 0.0;
+
+  Kokkos::parallel_reduce(
+      "CTHydroHst",
+      Kokkos::MDRangePolicy<Kokkos::Rank<4>>(
+          DevExecSpace(), {0, kb.s, jb.s, ib.s},
+          {face_b.GetDim(5), kb.e + 1, jb.e + 1, ib.e + 1},
+          {1, 1, 1, ib.e + 1 - ib.s}),
+      KOKKOS_LAMBDA(const int b, const int k, const int j, const int i, Real &lsum) {
+        const auto &faces = face_b(b);
+        const auto &cell_b = bcc(b);
+        const auto &coords = face_b.GetCoords(b);
+        const Real volume = coords.CellVolume(k, j, i);
+        const Real bx = cell_b(0, k, j, i);
+        const Real by = cell_b(1, k, j, i);
+        const Real bz = cell_b(2, k, j, i);
+
+        if (hst == Hst::emag) {
+          lsum += 0.5 * (SQR(bx) + SQR(by) + SQR(bz)) * volume;
+        } else if (hst == Hst::divb) {
+          const Real divb =
+              (faces(TopologicalElement::F1, 0, k, j, i + 1) *
+                   coords.FaceArea(X1DIR, k, j, i + 1) -
+               faces(TopologicalElement::F1, 0, k, j, i) *
+                   coords.FaceArea(X1DIR, k, j, i) +
+               faces(TopologicalElement::F2, 0, k, j + 1, i) *
+                   coords.FaceArea(X2DIR, k, j + 1, i) -
+               faces(TopologicalElement::F2, 0, k, j, i) *
+                   coords.FaceArea(X2DIR, k, j, i) +
+               (ndim > 2
+                    ? faces(TopologicalElement::F3, 0, k + 1, j, i) *
+                              coords.FaceArea(X3DIR, k + 1, j, i) -
+                          faces(TopologicalElement::F3, 0, k, j, i) *
+                              coords.FaceArea(X3DIR, k, j, i)
+                    : 0.0)) /
+              volume;
+          const Real abs_b = std::sqrt(SQR(bx) + SQR(by) + SQR(bz));
+          lsum += (abs_b != 0.0)
+                      ? 0.5 * std::sqrt(SQR(coords.Dxc<1>(k, j, i)) +
+                                        SQR(coords.Dxc<2>(k, j, i)) +
+                                        SQR(coords.Dxc<3>(k, j, i))) *
+                            std::abs(divb) / abs_b * volume
+                      : 0.0;
+        }
+      },
+      sum);
+
+  if (hst == Hst::divb) {
+    Mesh *pmesh = md->GetMeshPointer();
+    auto mesh_size = pmesh->mesh_size;
+    Real vol = (mesh_size.xmax(X1DIR) - mesh_size.xmin(X1DIR)) *
+               (mesh_size.xmax(X2DIR) - mesh_size.xmin(X2DIR)) *
+               (mesh_size.xmax(X3DIR) - mesh_size.xmin(X3DIR));
+    sum /= vol;
+  }
+  return sum;
+}
+
 template <Hst hst, int idx = -1>
 Real HydroHst(MeshData<Real> *md) {
   auto hydro_pkg = md->GetBlockData(0)->GetBlockPointer()->packages.Get("Hydro");
+
+  if constexpr (hst == Hst::emag || hst == Hst::divb) {
+    if (hydro_pkg->Param<Fluid>("fluid") == Fluid::ctmhd) {
+      return CTHydroHst<hst>(md);
+    }
+  }
 
   const auto &cons_pack = md->PackVariables(std::vector<std::string>{"cons"});
   const bool three_d = cons_pack.GetNdim() == 3;
@@ -305,8 +380,21 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
     auto glmmhd_alpha = pin->GetOrAddReal("hydro", "glmmhd_alpha", 0.1);
     pkg->AddParam<Real>("glmmhd_alpha", glmmhd_alpha);
     calc_c_h = true;
+  } else if (fluid_str == "ctmhd") {
+    fluid = Fluid::ctmhd;
+    nhydro = GetNVars<Fluid::ctmhd>();
   } else {
     PARTHENON_FAIL("AthenaPK hydro: Unknown fluid method.");
+  }
+  if (fluid == Fluid::ctmhd &&
+      (pin->DoesParameterExist("hydro", "glmmhd_source") ||
+       pin->DoesParameterExist("hydro", "glmmhd_alpha"))) {
+    PARTHENON_FAIL("AthenaPK hydro: ctmhd and GLMMHD options are mutually exclusive; "
+                   "remove hydro/glmmhd_source and hydro/glmmhd_alpha.");
+  }
+  if (fluid == Fluid::ctmhd &&
+      (pin->GetString("hydro", "reconstruction") != "dc" || pin->GetString("hydro", "riemann") != "llf")) {
+    PARTHENON_FAIL("AthenaPK hydro: ctmhd currently supports only dc reconstruction with the llf Riemann solver.");
   }
   pkg->AddParam<>("fluid", fluid);
   pkg->AddParam<>("nhydro", nhydro);
@@ -424,6 +512,8 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
       Hydro::CalculateFluxesTight<Fluid::euler>;
   flux_functions[std::make_tuple(Fluid::glmmhd, Reconstruction::dc, RiemannSolver::llf)] =
       Hydro::CalculateFluxesTight<Fluid::glmmhd>;
+  flux_functions[std::make_tuple(Fluid::ctmhd, Reconstruction::dc, RiemannSolver::llf)] =
+    Hydro::CalculateFluxesTight<Fluid::ctmhd>;
 
   // flux used in all stages expect the first. First stage is set below based on integr.
   FluxFun_t *flux_other_stage = nullptr;
@@ -486,6 +576,9 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
     } else if (fluid == Fluid::glmmhd) {
       pkg->AddParam<FirstOrderFluxCorrectFun_t *>("first_order_flux_correct_fun",
                                                   FirstOrderFluxCorrect<Fluid::glmmhd>);
+    } else if (fluid == Fluid::ctmhd) {
+      pkg->AddParam<FirstOrderFluxCorrectFun_t *>("first_order_flux_correct_fun",
+                                                  FirstOrderFluxCorrect<Fluid::ctmhd>);
     }
   }
 
@@ -725,6 +818,15 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
       pkg->AddParam<>("eos", eos);
       pkg->FillDerivedMesh = ConsToPrim<AdiabaticGLMMHDEOS>;
       pkg->EstimateTimestepMesh = EstimateTimestep<Fluid::glmmhd>;
+    } else if (fluid == Fluid::ctmhd) {
+      AdiabaticCTMHDEOS eos(pfloor, dfloor, efloor, vceil, eceil, gamma);
+      pkg->AddParam<>("eos", eos);
+      pkg->FillDerivedMesh = ConsToPrim<AdiabaticCTMHDEOS>;
+      pkg->PostProblemGeneratorMesh =
+          [](Mesh *pmesh, ParameterInput *pin, MeshData<Real> *md) {
+            InitializeCTFields(md);
+          };
+      pkg->EstimateTimestepMesh = EstimateTimestep<Fluid::ctmhd>;
     }
   } else {
     PARTHENON_FAIL("AthenaPK hydro: Unknown EOS");
@@ -763,24 +865,29 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
   cons_labels[IM2] = "momentum_density_2";
   cons_labels[IM3] = "momentum_density_3";
   cons_labels[IEN] = "total_energy_density";
-  if (fluid == Fluid::glmmhd) {
+  if (IsMHD(fluid)) {
     cons_labels[IB1] = "magnetic_field_1";
     cons_labels[IB2] = "magnetic_field_2";
     cons_labels[IB3] = "magnetic_field_3";
+  }
+  if (fluid == Fluid::glmmhd) {
     cons_labels[IPS] = "magnetic_psi";
   }
 
   // TODO(pgrete) check if this could be "one-copy" for two stage SSP integrators
-  std::vector<std::string> prim_labels(nhydro);
+  const int nprim_hydro = (fluid == Fluid::ctmhd) ? 8 : nhydro;
+  std::vector<std::string> prim_labels(nprim_hydro);
   prim_labels[IDN] = "density";
   prim_labels[IV1] = "velocity_1";
   prim_labels[IV2] = "velocity_2";
   prim_labels[IV3] = "velocity_3";
   prim_labels[IPR] = "pressure";
-  if (fluid == Fluid::glmmhd) {
+  if (IsMHD(fluid)) {
     prim_labels[IB1] = "magnetic_field_1";
     prim_labels[IB2] = "magnetic_field_2";
     prim_labels[IB3] = "magnetic_field_3";
+  }
+  if (fluid == Fluid::glmmhd) {
     prim_labels[IPS] = "magnetic_psi";
   }
   for (auto i = 0; i < nscalars; i++) {
@@ -798,6 +905,25 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
   m = Metadata({Metadata::Cell, Metadata::Derived}, std::vector<int>({nhydro + nscalars}),
                prim_labels);
   pkg->AddField("prim", m);
+
+  if (fluid == Fluid::ctmhd) {
+    // The CT magnetic field is one scalar on each face topology. WithFluxes makes
+    // Parthenon allocate the corresponding edge-topological EMF storage.
+    auto face_b_metadata = Metadata({Metadata::Face, Metadata::Independent,
+                                     Metadata::FillGhost, Metadata::WithFluxes});
+    face_b_metadata.RegisterRefinementOps<
+        parthenon::refinement_ops::ProlongateSharedMinMod,
+        parthenon::refinement_ops::RestrictAverage,
+        parthenon::refinement_ops::ProlongateInternalTothAndRoe>();
+    pkg->AddField("ct_b", face_b_metadata);
+
+    pkg->AddField(
+        "ct_bcc",
+        Metadata({Metadata::Cell, Metadata::Derived, Metadata::OneCopy},
+                 std::vector<int>{3},
+                 std::vector<std::string>{"magnetic_field_1", "magnetic_field_2",
+                                          "magnetic_field_3"}));
+  }
 
   const auto refine_str = pin->GetOrAddString("refinement", "type", "unset");
   if (refine_str == "pressure_gradient") {
@@ -845,9 +971,7 @@ Real EstimateHyperbolicTimestep(MeshData<Real> *md) {
   auto hydro_pkg = md->GetBlockData(0)->GetBlockPointer()->packages.Get("Hydro");
   const auto &cfl_hyp = hydro_pkg->Param<Real>("cfl");
   const auto &prim_pack = md->PackVariables(std::vector<std::string>{"prim"});
-  const auto &eos_ =
-      hydro_pkg->Param<typename std::conditional<fluid == Fluid::euler, AdiabaticHydroEOS,
-                                                 AdiabaticGLMMHDEOS>::type>("eos");
+  const auto &eos_ = hydro_pkg->Param<EOSType<fluid>>("eos");
 
   IndexRange ib = md->GetBlockData(0)->GetBoundsI(IndexDomain::interior);
   IndexRange jb = md->GetBlockData(0)->GetBoundsJ(IndexDomain::interior);
@@ -883,6 +1007,19 @@ Real EstimateHyperbolicTimestep(MeshData<Real> *md) {
           lambda_max_z = lambda_max_x;
 
         } else if constexpr (fluid == Fluid::glmmhd) {
+          lambda_max_x = eos.FastMagnetosonicSpeed(
+              w[IDN], w[IPR], prim(IB1, k, j, i), prim(IB2, k, j, i), prim(IB3, k, j, i));
+          if (ndim > 1) {
+            lambda_max_y =
+                eos.FastMagnetosonicSpeed(w[IDN], w[IPR], prim(IB2, k, j, i),
+                                          prim(IB3, k, j, i), prim(IB1, k, j, i));
+          }
+          if (ndim > 2) {
+            lambda_max_z =
+                eos.FastMagnetosonicSpeed(w[IDN], w[IPR], prim(IB3, k, j, i),
+                                          prim(IB1, k, j, i), prim(IB2, k, j, i));
+          }
+        } else if constexpr (fluid == Fluid::ctmhd) {
           lambda_max_x = eos.FastMagnetosonicSpeed(
               w[IDN], w[IPR], prim(IB1, k, j, i), prim(IB2, k, j, i), prim(IB3, k, j, i));
           if (ndim > 1) {
@@ -998,13 +1135,11 @@ TaskStatus CalculateFluxesTight(std::shared_ptr<MeshData<Real>> &md) {
   IndexRange jb = pmb->cellbounds.GetBoundsJ(IndexDomain::interior);
   IndexRange kb = pmb->cellbounds.GetBoundsK(IndexDomain::interior);
 
-  std::vector<parthenon::MetadataFlag> flags_ind({Metadata::Independent});
+  std::vector<parthenon::MetadataFlag> flags_ind({Metadata::Independent, Metadata::Cell});
   auto cons_in = md->PackVariablesAndFluxes(flags_ind);
   auto pkg = pmb->packages.Get("Hydro");
 
-  const auto &eos =
-      pkg->Param<typename std::conditional<fluid == Fluid::euler, AdiabaticHydroEOS,
-                                           AdiabaticGLMMHDEOS>::type>("eos");
+  const auto &eos = pkg->Param<EOSType<fluid>>("eos");
 
   // Hyperbolic divergence cleaning speed for GLM MHD
   Real c_h = 0.0;
@@ -1052,15 +1187,13 @@ TaskStatus CalculateFluxes(std::shared_ptr<MeshData<Real>> &md) {
       jl = jb.s - 1, ju = jb.e + 1, kl = kb.s - 1, ku = kb.e + 1;
   }
 
-  std::vector<parthenon::MetadataFlag> flags_ind({Metadata::Independent});
+  std::vector<parthenon::MetadataFlag> flags_ind({Metadata::Independent, Metadata::Cell});
   auto cons_in = md->PackVariablesAndFluxes(flags_ind);
   auto pkg = pmb->packages.Get("Hydro");
   const auto nhydro = pkg->Param<int>("nhydro");
   const auto nscalars = pkg->Param<int>("nscalars");
 
-  const auto &eos =
-      pkg->Param<typename std::conditional<fluid == Fluid::euler, AdiabaticHydroEOS,
-                                           AdiabaticGLMMHDEOS>::type>("eos");
+  const auto &eos = pkg->Param<EOSType<fluid>>("eos");
 
   auto num_scratch_vars = nhydro + nscalars;
 
@@ -1248,15 +1381,13 @@ TaskStatus FirstOrderFluxCorrect(MeshData<Real> *u0_data, MeshData<Real> *u1_dat
   IndexRange jb = pmb->cellbounds.GetBoundsJ(IndexDomain::interior);
   IndexRange kb = pmb->cellbounds.GetBoundsK(IndexDomain::interior);
 
-  std::vector<parthenon::MetadataFlag> flags_ind({Metadata::Independent});
+  std::vector<parthenon::MetadataFlag> flags_ind({Metadata::Independent, Metadata::Cell});
   auto u0_cons_pack = u0_data->PackVariablesAndFluxes(flags_ind);
   auto const &u0_prim_pack = u0_data->PackVariables(std::vector<std::string>{"prim"});
   auto u1_cons_pack = u1_data->PackVariablesAndFluxes(flags_ind);
   auto pkg = pmb->packages.Get("Hydro");
 
-  const auto &eos =
-      pkg->Param<typename std::conditional<fluid == Fluid::euler, AdiabaticHydroEOS,
-                                           AdiabaticGLMMHDEOS>::type>("eos");
+  const auto &eos = pkg->Param<EOSType<fluid>>("eos");
 
   // Hyperbolic divergence cleaning speed for GLM MHD
   Real c_h = 0.0;

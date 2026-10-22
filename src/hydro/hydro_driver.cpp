@@ -26,6 +26,7 @@
 #include "glmmhd/glmmhd.hpp"
 #include "hydro.hpp"
 #include "hydro_driver.hpp"
+#include "ctmhd/ct_update.hpp"
 
 using namespace parthenon::driver::prelude;
 
@@ -49,7 +50,7 @@ TaskStatus ResetFluxes(MeshData<Real> *md) {
 
   // In principle, we'd only need to pack Metadata::WithFluxes here, but
   // choosing to mirror other use in the code so that the packs are already cached.
-  std::vector<parthenon::MetadataFlag> flags_ind({Metadata::Independent});
+  std::vector<parthenon::MetadataFlag> flags_ind({Metadata::Independent, Metadata::Cell});
   auto cons_pack = md->PackVariablesAndFluxes(flags_ind);
 
   const int ndim = pmb->pmy_mesh->ndim;
@@ -456,6 +457,7 @@ TaskCollection HydroDriver::MakeTaskCollection(BlockList_t &blocks, int stage) {
     if (diffint == DiffInt::rkl2) {
       AddSTSTasks(&tc, pmesh, blocks, 0.5 * tm.dt);
     }
+
     TaskRegion &strang_init_region = tc.AddRegion(num_partitions);
     for (int i = 0; i < num_partitions; i++) {
       auto &tl = strang_init_region[i];
@@ -481,16 +483,21 @@ TaskCollection HydroDriver::MakeTaskCollection(BlockList_t &blocks, int stage) {
       auto &u1 = pmb->meshblock_data.Get("u1");
       auto init_u1 = tl.AddTask(
           none,
-          [](MeshBlockData<Real> *u0, MeshBlockData<Real> *u1, bool copy_prim) {
+          [](MeshBlockData<Real> *u0, MeshBlockData<Real> *u1, bool copy_prim,
+             bool copy_ct_b) {
             u1->Get("cons").data.DeepCopy(u0->Get("cons").data);
             if (copy_prim) {
               u1->Get("prim").data.DeepCopy(u0->Get("prim").data);
+            }
+            if (copy_ct_b) {
+              u1->Get("ct_b").data.DeepCopy(u0->Get("ct_b").data);
             }
             return TaskStatus::complete;
           },
           // First order flux correction needs the original prim variables in the
           // during the correction.
-          u0.get(), u1.get(), hydro_pkg->Param<bool>("first_order_flux_correct"));
+          u0.get(), u1.get(), hydro_pkg->Param<bool>("first_order_flux_correct"),
+          hydro_pkg->Param<Fluid>("fluid") == Fluid::ctmhd);
     }
   }
 
@@ -510,31 +517,39 @@ TaskCollection HydroDriver::MakeTaskCollection(BlockList_t &blocks, int stage) {
     const auto flux_str = (stage == 1) ? "flux_first_stage" : "flux_other_stage";
     FluxFun_t *calc_flux_fun = hydro_pkg->Param<FluxFun_t *>(flux_str);
     auto calc_flux = tl.AddTask(none, calc_flux_fun, mu0);
+    auto calc_ct_emfs = calc_flux;
+    if (hydro_pkg->Param<Fluid>("fluid") == Fluid::ctmhd) {
+      calc_ct_emfs = tl.AddTask(calc_flux, CalculateCTEMFs, mu0.get());
+    }
 
     // TODO(pgrete) figure out what to do about the sources from the first stage
     // that are potentially disregarded when the (m)hd fluxes are corrected in the second
     // stage.
-    TaskID first_order_flux_correct = calc_flux;
+    TaskID first_order_flux_correct = calc_ct_emfs;
     if (hydro_pkg->Param<bool>("first_order_flux_correct")) {
       auto *first_order_flux_correct_fun =
           hydro_pkg->Param<FirstOrderFluxCorrectFun_t *>("first_order_flux_correct_fun");
       first_order_flux_correct =
-          tl.AddTask(calc_flux, first_order_flux_correct_fun, mu0.get(), mu1.get(),
+          tl.AddTask(calc_ct_emfs, first_order_flux_correct_fun, mu0.get(), mu1.get(),
                      integrator->gam0[stage - 1], integrator->gam1[stage - 1],
                      integrator->beta[stage - 1] * integrator->dt);
     }
 
-    auto send_flx =
-        tl.AddTask(first_order_flux_correct, parthenon::LoadAndSendFluxCorrections, mu0);
-    auto recv_flx = tl.AddTask(start_flxcor_recv, parthenon::ReceiveFluxCorrections, mu0);
-    auto set_flx = tl.AddTask(recv_flx | first_order_flux_correct,
-                              parthenon::SetFluxCorrections, mu0);
+      auto set_flx = parthenon::AddFluxCorrectionTasks(
+        start_flxcor_recv | first_order_flux_correct, tl, mu0, pmesh->multilevel);
 
     // compute the divergence of fluxes of conserved variables
     auto update = tl.AddTask(
         set_flx, parthenon::Update::UpdateWithFluxDivergence<MeshData<Real>>, mu0.get(),
         mu1.get(), integrator->gam0[stage - 1], integrator->gam1[stage - 1],
         integrator->beta[stage - 1] * integrator->dt);
+    if (hydro_pkg->Param<Fluid>("fluid") == Fluid::ctmhd) {
+      update = tl.AddTask(
+        update, UpdateCTFaceField, mu0.get(), mu1.get(), integrator->gam0[stage - 1],
+        integrator->gam1[stage - 1], integrator->beta[stage - 1] * integrator->dt);
+      update = tl.AddTask(
+          update, parthenon::Update::FillDerived<MeshData<Real>>, mu0.get());
+    }
 
     // Add non-operator split source terms.
     // Note: Directly update the "cons" variables of mu0 based on the "prim" variables

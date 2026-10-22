@@ -10,6 +10,8 @@
 #include <parthenon/package.hpp>
 
 #include "../eos/adiabatic_hydro.hpp"
+#include "../eos/adiabatic_ctmhd.hpp"
+#include "../eos/adiabatic_glmmhd.hpp"
 
 using namespace parthenon::package::prelude;
 
@@ -50,6 +52,12 @@ TaskStatus FirstOrderFluxCorrect(MeshData<Real> *u0_data, MeshData<Real> *u1_dat
                                  const Real gam0, const Real gam1, const Real beta_dt);
 using FirstOrderFluxCorrectFun_t = decltype(FirstOrderFluxCorrect<Fluid::glmmhd>);
 
+template <Fluid fluid>
+using EOSType = typename std::conditional<
+  fluid == Fluid::euler, AdiabaticHydroEOS,
+  typename std::conditional<fluid == Fluid::glmmhd, AdiabaticGLMMHDEOS,
+                 AdiabaticCTMHDEOS>::type>::type;
+
 using FluxFunKey_t = std::tuple<Fluid, Reconstruction, RiemannSolver>;
 
 // Add flux function pointer to map containing all compiled in flux functions
@@ -75,7 +83,7 @@ constexpr size_t GetNVars<Fluid::glmmhd>() {
 
 template <>
 constexpr size_t GetNVars<Fluid::ctmhd>() {
-  return 8; // above plus the derived cell-centered B_x, B_y, B_z
+  return 8; // retain the shared cell-state layout used by active consumers
 }
 
 } // namespace Hydro

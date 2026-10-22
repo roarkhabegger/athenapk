@@ -82,9 +82,8 @@ struct Riemann<Fluid::ctmhd, RiemannSolver::llf> {
     cons.flux(ivx, ivz, k, j, i) = 0.5 * (f.mz - a *
         (wr[IDN] * wr[IV3] - wl[IDN] * wl[IV3]));
     cons.flux(ivx, IEN, k, j, i) = 0.5 * (f.e - a * (er - el));
-    cons.flux(ivx, iBx, k, j, i) = 0.0;
-    cons.flux(ivx, iBy, k, j, i) = 0.5 * (f.by - a * (wr[IB2] - wl[IB2]));
-    cons.flux(ivx, iBz, k, j, i) = 0.5 * (f.bz - a * (wr[IB3] - wl[IB3]));
+    // CT evolves magnetic fluxes on ct_b's faces, not in the cell-centered
+    // conserved state.
 
     for (auto n = Hydro::GetNVars<Fluid::ctmhd>(); n < cons.GetDim(4); ++n) {
       const auto source = (cons.flux(ivx, IDN, k, j, i) >= 0.0) ?

@@ -97,7 +97,7 @@ void MomentumDiffFluxIsoFixed(MeshData<Real> *md) {
   IndexRange jb = pmb->cellbounds.GetBoundsJ(IndexDomain::interior);
   IndexRange kb = pmb->cellbounds.GetBoundsK(IndexDomain::interior);
 
-  std::vector<parthenon::MetadataFlag> flags_ind({Metadata::Independent});
+  std::vector<parthenon::MetadataFlag> flags_ind({Metadata::Independent, Metadata::Cell});
   auto cons_pack = md->PackVariablesAndFluxes(flags_ind);
   auto hydro_pkg = pmb->packages.Get("Hydro");
 
