@@ -153,7 +153,7 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
   const auto nhydro = hydro_pkg->Param<int>("nhydro");
   const auto nscalars = hydro_pkg->Param<int>("nscalars");
 
-  const bool mhd_enabled = hydro_pkg->Param<Fluid>("fluid") == Fluid::glmmhd;
+  const bool mhd_enabled = IsMHD(hydro_pkg->Param<Fluid>("fluid"));
   if (((Bx != 0.0) || (By != 0.0) || (Bz != 0.0)) && !mhd_enabled) {
     PARTHENON_FAIL("Requested to initialize magnetic fields by `cloud/plasma_beta > 0`, "
                    "but `hydro/fluid` is not supporting MHD.");

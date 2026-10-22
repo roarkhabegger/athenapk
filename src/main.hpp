@@ -35,7 +35,15 @@ enum { IV1 = 1, IV2 = 2, IV3 = 3, IPR = 4 };
 enum class RiemannSolver { undefined, none, hlle, llf, hllc, hlld };
 enum class Reconstruction { undefined, dc, plm, ppm, wenoz, weno3, limo3 };
 enum class Integrator { undefined, rk1, rk2, vl2, rk3 };
-enum class Fluid { undefined, euler, glmmhd };
+enum class Fluid { undefined, euler, glmmhd, ctmhd };
+
+constexpr bool IsMHD(const Fluid fluid) {
+  return fluid == Fluid::glmmhd || fluid == Fluid::ctmhd;
+}
+
+constexpr bool UsesGLM(const Fluid fluid) { return fluid == Fluid::glmmhd; }
+
+constexpr bool UsesCT(const Fluid fluid) { return fluid == Fluid::ctmhd; }
 enum class Cooling { none, tabular };
 enum class Conduction { none, isotropic, anisotropic };
 enum class ConductionCoeff { none, fixed, spitzer };

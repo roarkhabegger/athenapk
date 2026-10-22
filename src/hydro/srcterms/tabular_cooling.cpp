@@ -293,7 +293,7 @@ void TabularCooling::SubcyclingFixedIntSrcTerm(MeshData<Real> *md, const Real dt
 
   const auto dt = dt_; // HACK capturing parameters still broken with Cuda 11.6 ...
   auto hydro_pkg = md->GetBlockData(0)->GetBlockPointer()->packages.Get("Hydro");
-  const bool mhd_enabled = hydro_pkg->Param<Fluid>("fluid") == Fluid::glmmhd;
+  const bool mhd_enabled = IsMHD(hydro_pkg->Param<Fluid>("fluid"));
   // Grab member variables for compiler
 
   const CoolingTableObj cooling_table_obj = cooling_table_obj_;
@@ -489,7 +489,7 @@ void TabularCooling::SubcyclingFixedIntSrcTerm(MeshData<Real> *md, const Real dt
 void TabularCooling::TownsendSrcTerm(parthenon::MeshData<parthenon::Real> *md,
                                      const parthenon::Real dt_) const {
   auto hydro_pkg = md->GetBlockData(0)->GetBlockPointer()->packages.Get("Hydro");
-  const bool mhd_enabled = hydro_pkg->Param<Fluid>("fluid") == Fluid::glmmhd;
+  const bool mhd_enabled = IsMHD(hydro_pkg->Param<Fluid>("fluid"));
 
   // Grab member variables for compiler
   const auto dt = dt_; // HACK capturing parameters still broken with Cuda 11.6 ...

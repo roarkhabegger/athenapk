@@ -71,7 +71,8 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
 
   // TODO(pgrete) this should be safe because we call this package init after the hydro
   // one, but we should check if there's direct way to access Params of other packages.
-  const bool mhd = pin->GetString("hydro", "fluid") == "glmmhd";
+  const auto fluid_str = pin->GetString("hydro", "fluid");
+  const bool mhd = fluid_str == "glmmhd" || fluid_str == "ctmhd";
 
   PARTHENON_REQUIRE_THROWS(
       !pin->DoesParameterExist("parthenon/mesh", "refinement") ||
@@ -256,7 +257,7 @@ TaskStatus AdvectTracers(MeshBlockData<Real> *mbd, const Real dt) {
  **/
 TaskStatus FillTracers(MeshData<Real> *md, parthenon::SimTime &tm) {
   auto hydro_pkg = md->GetParentPointer()->packages.Get("Hydro");
-  const auto mhd = hydro_pkg->Param<Fluid>("fluid") == Fluid::glmmhd;
+  const auto mhd = IsMHD(hydro_pkg->Param<Fluid>("fluid"));
 
   auto tracers_pkg = md->GetParentPointer()->packages.Get("tracers");
 

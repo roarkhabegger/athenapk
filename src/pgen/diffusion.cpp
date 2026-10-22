@@ -26,7 +26,7 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
   auto &u = mbd->Get("cons").data;
 
   const auto gamma = pin->GetReal("hydro", "gamma");
-  const bool mhd_enabled = hydro_pkg->Param<Fluid>("fluid") == Fluid::glmmhd;
+  const bool mhd_enabled = IsMHD(hydro_pkg->Param<Fluid>("fluid"));
 
   const auto Bx = pin->GetOrAddReal("problem/diffusion", "Bx", 0.0);
   const auto By = pin->GetOrAddReal("problem/diffusion", "By", 0.0);
