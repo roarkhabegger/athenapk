@@ -73,6 +73,11 @@ constexpr size_t GetNVars<Fluid::glmmhd>() {
   return 9; // above plus B_x, B_y, B_z, psi
 }
 
+template <>
+constexpr size_t GetNVars<Fluid::ctmhd>() {
+  return 8; // above plus the derived cell-centered B_x, B_y, B_z
+}
+
 } // namespace Hydro
 
 #endif // HYDRO_HYDRO_HPP_

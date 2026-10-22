@@ -24,6 +24,7 @@ template <Fluid fluid, RiemannSolver rsolver>
 struct Riemann;
 
 // now include the specializations
+#include "ctmhd_dc_llf.hpp"
 #include "glmmhd_dc_llf.hpp"
 #include "glmmhd_hlld.hpp"
 #include "glmmhd_hlle.hpp"

@@ -5,6 +5,7 @@ add_executable(
     athenaPK
         main.cpp
         eos/adiabatic_glmmhd.cpp
+        eos/adiabatic_ctmhd.cpp
         units.hpp
         bvals/boundary_conditions_apk.hpp
         eos/adiabatic_hydro.cpp
