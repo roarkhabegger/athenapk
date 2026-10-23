@@ -917,12 +917,13 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
         parthenon::refinement_ops::ProlongateInternalTothAndRoe>();
     pkg->AddField("ct_b", face_b_metadata);
 
-    pkg->AddField(
-        "ct_bcc",
-        Metadata({Metadata::Cell, Metadata::Derived, Metadata::OneCopy},
-                 std::vector<int>{3},
-                 std::vector<std::string>{"magnetic_field_1", "magnetic_field_2",
-                                          "magnetic_field_3"}));
+    // Solver-computed EMFs and weights: stored in single face field
+    // Layout: [E1, E2, E3, w_E1, w_E2, w_E3] (6 components per face)
+    // Metadata::Derived means not checkpointed/output, only used during CT update step
+    auto emf_weight_metadata = Metadata({Metadata::Face, Metadata::Derived},
+                                        std::vector<int>({6}),
+                                        std::vector<std::string>({"emf_wt"}));
+    pkg->AddField("ct_emf_weights", emf_weight_metadata);
   }
 
   const auto refine_str = pin->GetOrAddString("refinement", "type", "unset");
@@ -1164,6 +1165,147 @@ TaskStatus CalculateFluxesTight(std::shared_ptr<MeshData<Real>> &md) {
         }
         if (ndim >= 3) {
           riemann.Solve(eos, k, j, i, IV3, prim, cons, c_h);
+        }
+      });
+
+  return TaskStatus::complete;
+}
+
+// Template specialization for CTMHD to also compute EMFs and weights
+template <>
+TaskStatus CalculateFluxesTight<Fluid::ctmhd>(std::shared_ptr<MeshData<Real>> &md) {
+  auto pmb = md->GetBlockData(0)->GetBlockPointer();
+  IndexRange ib = pmb->cellbounds.GetBoundsI(IndexDomain::interior);
+  IndexRange jb = pmb->cellbounds.GetBoundsJ(IndexDomain::interior);
+  IndexRange kb = pmb->cellbounds.GetBoundsK(IndexDomain::interior);
+
+  std::vector<parthenon::MetadataFlag> flags_ind({Metadata::Independent, Metadata::Cell});
+  auto cons_in = md->PackVariablesAndFluxes(flags_ind);
+  auto pkg = pmb->packages.Get("Hydro");
+  auto const &prim_in = md->PackVariables(std::vector<std::string>{"prim"});
+  auto emf_weights = md->PackVariables(std::vector<std::string>{"ct_emf_weights"});
+
+  const auto &eos = pkg->Param<EOSType<Fluid::ctmhd>>("eos");
+
+  const int ndim = pmb->pmy_mesh->ndim;
+  auto riemann = Riemann<Fluid::ctmhd, RiemannSolver::llf>();
+  
+  // Step 1: Compute fluxes
+  parthenon::par_for(
+      DEFAULT_LOOP_PATTERN, "CT LLF fluxes", parthenon::DevExecSpace(), 0,
+      cons_in.GetDim(5) - 1, kb.s, kb.e + 1, jb.s, jb.e + 1, ib.s, ib.e + 1,
+      KOKKOS_LAMBDA(const int b, const int k, const int j, const int i) {
+        auto &cons = cons_in(b);
+        const auto &prim = prim_in(b);
+        riemann.Solve(eos, k, j, i, IV1, prim, cons, 0.0);
+        if (ndim >= 2) {
+          riemann.Solve(eos, k, j, i, IV2, prim, cons, 0.0);
+        }
+        if (ndim >= 3) {
+          riemann.Solve(eos, k, j, i, IV3, prim, cons, 0.0);
+        }
+      });
+
+  // Step 2: Compute EMFs and weights from primitives for Gardiner-Stone weighting
+  // For each direction, compute E_i = -(v_{i+1} * B_{i+2} - v_{i+2} * B_{i+1})
+  // and weights w_i = |rho * v_normal| (normalized upwind weight for GS07)
+  parthenon::par_for(
+      DEFAULT_LOOP_PATTERN, "CT compute EMF and weights", parthenon::DevExecSpace(), 0,
+      emf_weights.GetDim(5) - 1, kb.s, kb.e + 1, jb.s, jb.e + 1, ib.s, ib.e + 1,
+      KOKKOS_LAMBDA(const int b, const int k, const int j, const int i) {
+        const auto &prim = prim_in(b);
+
+        // X1 direction (perpendicular faces) -> E1 at Y-Z edges, weight from rho*v1
+        {
+          const int il = i - 1;
+          const Real rhol = prim(IDN, k, j, il);
+          const Real rhor = prim(IDN, k, j, i);
+          const Real v1l = prim(IV1, k, j, il);
+          const Real v1r = prim(IV1, k, j, i);
+          const Real v2l = prim(IV2, k, j, il);
+          const Real v2r = prim(IV2, k, j, i);
+          const Real v3l = prim(IV3, k, j, il);
+          const Real v3r = prim(IV3, k, j, i);
+          const Real b2l = prim(IB2, k, j, il);
+          const Real b2r = prim(IB2, k, j, i);
+          const Real b3l = prim(IB3, k, j, il);
+          const Real b3r = prim(IB3, k, j, i);
+
+          // Average velocity and B field at the face
+          const Real v2_avg = 0.5 * (v2l + v2r);
+          const Real v3_avg = 0.5 * (v3l + v3r);
+          const Real b2_avg = 0.5 * (b2l + b2r);
+          const Real b3_avg = 0.5 * (b3l + b3r);
+
+          // E1 = -(v_2 * B_3 - v_3 * B_2)
+          emf_weights(b, 0, k, j, i) = -(v2_avg * b3_avg - v3_avg * b2_avg);
+
+          // Weight: |rho * v_normal| for X1 normal direction
+          const Real rhov1_l = rhol * v1l;
+          const Real rhov1_r = rhor * v1r;
+          emf_weights(b, 3, k, j, i) = fmax(fabs(rhov1_l), fabs(rhov1_r));
+        }
+
+        // X2 direction (perpendicular faces) -> E2 at X-Z edges, weight from rho*v2
+        if (ndim >= 2) {
+          const int jl = j - 1;
+          const Real rhol = prim(IDN, k, jl, i);
+          const Real rhor = prim(IDN, k, j, i);
+          const Real v1l = prim(IV1, k, jl, i);
+          const Real v1r = prim(IV1, k, j, i);
+          const Real v2l = prim(IV2, k, jl, i);
+          const Real v2r = prim(IV2, k, j, i);
+          const Real v3l = prim(IV3, k, jl, i);
+          const Real v3r = prim(IV3, k, j, i);
+          const Real b1l = prim(IB1, k, jl, i);
+          const Real b1r = prim(IB1, k, j, i);
+          const Real b3l = prim(IB3, k, jl, i);
+          const Real b3r = prim(IB3, k, j, i);
+
+          // Average velocity and B field at the face
+          const Real v1_avg = 0.5 * (v1l + v1r);
+          const Real v3_avg = 0.5 * (v3l + v3r);
+          const Real b1_avg = 0.5 * (b1l + b1r);
+          const Real b3_avg = 0.5 * (b3l + b3r);
+
+          // E2 = -(v_3 * B_1 - v_1 * B_3)
+          emf_weights(b, 1, k, j, i) = -(v3_avg * b1_avg - v1_avg * b3_avg);
+
+          // Weight: |rho * v_normal| for X2 normal direction
+          const Real rhov2_l = rhol * v2l;
+          const Real rhov2_r = rhor * v2r;
+          emf_weights(b, 4, k, j, i) = fmax(fabs(rhov2_l), fabs(rhov2_r));
+        }
+
+        // X3 direction (perpendicular faces) -> E3 at X-Y edges, weight from rho*v3
+        if (ndim >= 3) {
+          const int kl = k - 1;
+          const Real rhol = prim(IDN, kl, j, i);
+          const Real rhor = prim(IDN, k, j, i);
+          const Real v1l = prim(IV1, kl, j, i);
+          const Real v1r = prim(IV1, k, j, i);
+          const Real v2l = prim(IV2, kl, j, i);
+          const Real v2r = prim(IV2, k, j, i);
+          const Real v3l = prim(IV3, kl, j, i);
+          const Real v3r = prim(IV3, k, j, i);
+          const Real b1l = prim(IB1, kl, j, i);
+          const Real b1r = prim(IB1, k, j, i);
+          const Real b2l = prim(IB2, kl, j, i);
+          const Real b2r = prim(IB2, k, j, i);
+
+          // Average velocity and B field at the face
+          const Real v1_avg = 0.5 * (v1l + v1r);
+          const Real v2_avg = 0.5 * (v2l + v2r);
+          const Real b1_avg = 0.5 * (b1l + b1r);
+          const Real b2_avg = 0.5 * (b2l + b2r);
+
+          // E3 = -(v_1 * B_2 - v_2 * B_1)
+          emf_weights(b, 2, k, j, i) = -(v1_avg * b2_avg - v2_avg * b1_avg);
+
+          // Weight: |rho * v_normal| for X3 normal direction
+          const Real rhov3_l = rhol * v3l;
+          const Real rhov3_r = rhor * v3r;
+          emf_weights(b, 5, k, j, i) = fmax(fabs(rhov3_l), fabs(rhov3_r));
         }
       });
 

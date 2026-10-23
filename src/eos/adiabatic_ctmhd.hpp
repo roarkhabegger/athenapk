@@ -32,10 +32,10 @@ class AdiabaticCTMHDEOS : public EquationOfState {
     return std::sqrt(0.5 * (qsq + std::sqrt(tmp * tmp + 4.0 * asq * ct2)) / d);
   }
 
-  template <typename View4D, typename BccView>
-  KOKKOS_INLINE_FUNCTION void ConsToPrim(View4D cons, View4D prim, BccView bcc,
-                                         const int &nhydro, const int &nscalars,
-                                         const int &k, const int &j, const int &i) const {
+  template <typename View4D>
+  KOKKOS_INLINE_FUNCTION void ConsToPrim(View4D cons, View4D prim, const int &nhydro,
+                                         const int &nscalars, const int &k, const int &j,
+                                         const int &i) const {
     const Real gm1 = gamma_ - 1.0;
     const Real density_floor = GetDensityFloor();
     const Real pressure_floor = GetPressureFloor();
@@ -53,12 +53,11 @@ class AdiabaticCTMHDEOS : public EquationOfState {
     Real &w_vy = prim(IV2, k, j, i);
     Real &w_vz = prim(IV3, k, j, i);
     Real &w_p = prim(IPR, k, j, i);
-    const Real b1 = bcc(0, k, j, i);
-    const Real b2 = bcc(1, k, j, i);
-    const Real b3 = bcc(2, k, j, i);
-    cons(IB1, k, j, i) = b1;
-    cons(IB2, k, j, i) = b2;
-    cons(IB3, k, j, i) = b3;
+    // cons(IB*) is synchronized from face-centered ct_b before EOS conversion
+    // and remains the single authoritative cell-center B representation
+    const Real b1 = cons(IB1, k, j, i);
+    const Real b2 = cons(IB2, k, j, i);
+    const Real b3 = cons(IB3, k, j, i);
     Real &w_Bx = prim(IB1, k, j, i);
     Real &w_By = prim(IB2, k, j, i);
     Real &w_Bz = prim(IB3, k, j, i);

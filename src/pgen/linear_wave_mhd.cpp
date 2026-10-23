@@ -176,7 +176,7 @@ void InitUserMeshData(Mesh *mesh, ParameterInput *pin) {
 //  \brief Compute L1 error in linear waves and output to file
 //========================================================================================
 
-void UserWorkAfterLoop(Mesh *mesh, ParameterInput *, parthenon::SimTime &tm) {
+void UserWorkAfterLoop(Mesh *mesh, ParameterInput *pin, parthenon::SimTime &tm) {
   if (!compute_error) return;
 
   constexpr int NGLMMHD = 8; // excluding psi

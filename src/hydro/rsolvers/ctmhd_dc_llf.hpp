@@ -8,6 +8,21 @@
 
 using parthenon::Real;
 
+// TODO: Modify this solver to output EMFs and weights to ct_emf_weights field
+// 
+// Current: Outputs conserved state fluxes only
+// Required for Gardiner-Stone EMF combination:
+//   - At face centers, compute electric field components (EMFs)
+//   - Store EMF values in ct_emf_weights (components 0-2: E1, E2, E3)
+//   - Compute weight from mass flux: w = |rho * v_normal| / max_rho_v
+//   - Store weights in ct_emf_weights (components 3-5: w_E1, w_E2, w_E3)
+// 
+// EMF computation (Lax-Friedrichs):
+//   E_edge = -(v × B) evaluated at face center
+// 
+// See: athenapk/src/hydro/ctmhd/ct_update.hpp::ComputeGardinerStoneEMFs
+//      for how EMFs and weights are combined via GS07 weighting
+
 struct CTMHDCons1D {
   Real d, mx, my, mz, e, by, bz;
 };

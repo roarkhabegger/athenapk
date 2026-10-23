@@ -519,7 +519,7 @@ TaskCollection HydroDriver::MakeTaskCollection(BlockList_t &blocks, int stage) {
     auto calc_flux = tl.AddTask(none, calc_flux_fun, mu0);
     auto calc_ct_emfs = calc_flux;
     if (hydro_pkg->Param<Fluid>("fluid") == Fluid::ctmhd) {
-      calc_ct_emfs = tl.AddTask(calc_flux, CalculateCTEMFs, mu0.get());
+      calc_ct_emfs = tl.AddTask(calc_flux, ComputeGardinerStoneEMFs, mu0.get());
     }
 
     // TODO(pgrete) figure out what to do about the sources from the first stage
@@ -547,8 +547,7 @@ TaskCollection HydroDriver::MakeTaskCollection(BlockList_t &blocks, int stage) {
       update = tl.AddTask(
         update, UpdateCTFaceField, mu0.get(), mu1.get(), integrator->gam0[stage - 1],
         integrator->gam1[stage - 1], integrator->beta[stage - 1] * integrator->dt);
-      update = tl.AddTask(
-          update, parthenon::Update::FillDerived<MeshData<Real>>, mu0.get());
+      update = tl.AddTask(update, SyncCTConservedMagneticField, mu0.get());
     }
 
     // Add non-operator split source terms.
