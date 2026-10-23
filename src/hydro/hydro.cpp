@@ -1127,6 +1127,10 @@ Real EstimateTimestep(MeshData<Real> *md) {
   return min_dt;
 }
 
+// Forward declaration for CTMHD specialization
+template <>
+TaskStatus CalculateFluxesTight<Fluid::ctmhd>(std::shared_ptr<MeshData<Real>> &md);
+
 // Calculate fluxes using a tightly nested 3D loop over the entire block.
 // Currently only used for testing the LLF Riemann solver used in first-order flux corr.
 template <Fluid fluid>

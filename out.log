@@ -1,0 +1,8 @@
+/opt/cray/pe/hdf5-parallel/1.14.3.9/gnu/12.2/bin/h5pcc
+/opt/nvidia/hpc_sdk/Linux_x86_64/26.5/comm_libs/mpi/bin/mpicxx
+-- The CXX compiler identification is unknown
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - failed
+-- Check for working CXX compiler: /opt/nvidia/hpc_sdk/Linux_x86_64/26.5/comm_libs/mpi/bin/mpicxx
+-- Check for working CXX compiler: /opt/nvidia/hpc_sdk/Linux_x86_64/26.5/comm_libs/mpi/bin/mpicxx - broken
+-- Configuring incomplete, errors occurred!
