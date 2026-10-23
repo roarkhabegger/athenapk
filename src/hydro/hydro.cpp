@@ -148,7 +148,7 @@ void PreStepMeshUserWorkInLoop(Mesh *pmesh, ParameterInput *pin, SimTime &tm) {
 template <Hst hst>
 Real CTHydroHst(MeshData<Real> *md) {
   const auto face_b = md->PackVariables(std::vector<std::string>{"ct_b"});
-  const auto bcc = md->PackVariables(std::vector<std::string>{"ct_bcc"});
+  const auto cons = md->PackVariables(std::vector<std::string>{"cons"});
   const auto ib = md->GetBlockData(0)->GetBoundsI(IndexDomain::interior);
   const auto jb = md->GetBlockData(0)->GetBoundsJ(IndexDomain::interior);
   const auto kb = md->GetBlockData(0)->GetBoundsK(IndexDomain::interior);
@@ -163,12 +163,12 @@ Real CTHydroHst(MeshData<Real> *md) {
           {1, 1, 1, ib.e + 1 - ib.s}),
       KOKKOS_LAMBDA(const int b, const int k, const int j, const int i, Real &lsum) {
         const auto &faces = face_b(b);
-        const auto &cell_b = bcc(b);
+        const auto &cell_cons = cons(b);
         const auto &coords = face_b.GetCoords(b);
         const Real volume = coords.CellVolume(k, j, i);
-        const Real bx = cell_b(0, k, j, i);
-        const Real by = cell_b(1, k, j, i);
-        const Real bz = cell_b(2, k, j, i);
+        const Real bx = cell_cons(IB1, k, j, i);
+        const Real by = cell_cons(IB2, k, j, i);
+        const Real bz = cell_cons(IB3, k, j, i);
 
         if (hst == Hst::emag) {
           lsum += 0.5 * (SQR(bx) + SQR(by) + SQR(bz)) * volume;
