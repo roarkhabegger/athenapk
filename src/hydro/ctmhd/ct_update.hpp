@@ -58,8 +58,6 @@ inline TaskStatus InitializeCTFaceField(MeshData<Real> *md) {
 
 inline void InitializeCTFields(MeshData<Real> *md) {
   InitializeCTFaceField(md);
-  auto hydro_pkg = md->GetBlockData(0)->GetBlockPointer()->packages.Get("Hydro");
-  hydro_pkg->FillDerivedMesh(md);
 }
 
 inline TaskStatus CalculateCTEMFs(MeshData<Real> *md) {
@@ -110,30 +108,26 @@ inline TaskStatus CalculateCTEMFs(MeshData<Real> *md) {
         face_b(b).template flux<parthenon::TopologicalType::Edge>(1, 0, k, j, i) =
           edge_emf(b, k, j, i, 1);
       });
-  if (ndim > 1) {
-    const auto ib_e2 = md->GetBoundsI(parthenon::CellLevel::same, IndexDomain::interior, TE::E2);
-    const auto jb_e2 = md->GetBoundsJ(parthenon::CellLevel::same, IndexDomain::interior, TE::E2);
-    const auto kb_e2 = md->GetBoundsK(parthenon::CellLevel::same, IndexDomain::interior, TE::E2);
-    parthenon::par_for(
-        DEFAULT_LOOP_PATTERN, "CT edge EMF x2", parthenon::DevExecSpace(), 0,
+  const auto ib_e2 = md->GetBoundsI(parthenon::CellLevel::same, IndexDomain::interior, TE::E2);
+  const auto jb_e2 = md->GetBoundsJ(parthenon::CellLevel::same, IndexDomain::interior, TE::E2);
+  const auto kb_e2 = md->GetBoundsK(parthenon::CellLevel::same, IndexDomain::interior, TE::E2);
+  parthenon::par_for(
+      DEFAULT_LOOP_PATTERN, "CT edge EMF x2", parthenon::DevExecSpace(), 0,
       face_b.GetDim(5) - 1, kb_e2.s, kb_e2.e, jb_e2.s, jb_e2.e, ib_e2.s, ib_e2.e,
-        KOKKOS_LAMBDA(const int b, const int k, const int j, const int i) {
-            face_b(b).template flux<parthenon::TopologicalType::Edge>(2, 0, k, j, i) =
-              edge_emf(b, k, j, i, 2);
-        });
-  }
-  if (ndim > 2) {
-    const auto ib_e3 = md->GetBoundsI(parthenon::CellLevel::same, IndexDomain::interior, TE::E3);
-    const auto jb_e3 = md->GetBoundsJ(parthenon::CellLevel::same, IndexDomain::interior, TE::E3);
-    const auto kb_e3 = md->GetBoundsK(parthenon::CellLevel::same, IndexDomain::interior, TE::E3);
-    parthenon::par_for(
-        DEFAULT_LOOP_PATTERN, "CT edge EMF x3", parthenon::DevExecSpace(), 0,
+      KOKKOS_LAMBDA(const int b, const int k, const int j, const int i) {
+        face_b(b).template flux<parthenon::TopologicalType::Edge>(2, 0, k, j, i) =
+            edge_emf(b, k, j, i, 2);
+      });
+  const auto ib_e3 = md->GetBoundsI(parthenon::CellLevel::same, IndexDomain::interior, TE::E3);
+  const auto jb_e3 = md->GetBoundsJ(parthenon::CellLevel::same, IndexDomain::interior, TE::E3);
+  const auto kb_e3 = md->GetBoundsK(parthenon::CellLevel::same, IndexDomain::interior, TE::E3);
+  parthenon::par_for(
+      DEFAULT_LOOP_PATTERN, "CT edge EMF x3", parthenon::DevExecSpace(), 0,
       face_b.GetDim(5) - 1, kb_e3.s, kb_e3.e, jb_e3.s, jb_e3.e, ib_e3.s, ib_e3.e,
-        KOKKOS_LAMBDA(const int b, const int k, const int j, const int i) {
-            face_b(b).template flux<parthenon::TopologicalType::Edge>(3, 0, k, j, i) =
-              edge_emf(b, k, j, i, 3);
-        });
-  }
+      KOKKOS_LAMBDA(const int b, const int k, const int j, const int i) {
+        face_b(b).template flux<parthenon::TopologicalType::Edge>(3, 0, k, j, i) =
+            edge_emf(b, k, j, i, 3);
+      });
   return TaskStatus::complete;
 }
 
@@ -210,8 +204,6 @@ inline TaskStatus UpdateCTFaceField(MeshData<Real> *u0_data, MeshData<Real> *u1_
   for (const auto te_var : parthenon::GetTopologicalElements(TT::Face)) {
     for (const auto te_flux : parthenon::GetTopologicalElements(TT::Edge)) {
       if (!parthenon::IsSubmanifold(te_flux, te_var)) continue;
-      if (ndim < 3 && te_flux == TE::E3) continue;
-      if (ndim < 2 && te_flux == TE::E2) continue;
       const int indicator = (static_cast<int>(te_flux) -
                              static_cast<int>(te_var) + 3) % 3;
       const Real fac = (indicator == 2) ? -beta_dt : beta_dt;

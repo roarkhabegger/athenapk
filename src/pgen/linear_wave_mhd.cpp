@@ -41,6 +41,7 @@ Real d0, p0, u0, bx0, by0, bz0, dby, dbz;
 int wave_flag;
 Real ang_2, ang_3;           // Rotation angles about the y and z' axis
 bool ang_2_vert, ang_3_vert; // Switches to set ang_2 and/or ang_3 to pi/2
+bool compute_error;
 Real sin_a2, cos_a2, sin_a3, cos_a3;
 Real amp, lambda, k_par; // amplitude, Wavelength, 2*PI/wavelength
 Real gam, gm1, iso_cs, vflow;
@@ -75,6 +76,7 @@ void InitUserMeshData(Mesh *mesh, ParameterInput *pin) {
 
   ang_2_vert = pin->GetOrAddBoolean("problem/linear_wave", "ang_2_vert", false);
   ang_3_vert = pin->GetOrAddBoolean("problem/linear_wave", "ang_3_vert", false);
+  compute_error = pin->GetOrAddBoolean("problem/linear_wave", "compute_error", false);
 
   // initialize global variables
   gam = pin->GetReal("hydro", "gamma");
@@ -174,8 +176,8 @@ void InitUserMeshData(Mesh *mesh, ParameterInput *pin) {
 //  \brief Compute L1 error in linear waves and output to file
 //========================================================================================
 
-void UserWorkAfterLoop(Mesh *mesh, ParameterInput *pin, parthenon::SimTime &tm) {
-  if (!pin->GetOrAddBoolean("problem/linear_wave", "compute_error", false)) return;
+void UserWorkAfterLoop(Mesh *mesh, ParameterInput *, parthenon::SimTime &tm) {
+  if (!compute_error) return;
 
   constexpr int NGLMMHD = 8; // excluding psi
 

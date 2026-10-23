@@ -66,9 +66,10 @@ struct Riemann<Fluid::ctmhd, RiemannSolver::llf> {
            bx * (wl[IB3] + wr[IB3]);
     f.by = wl[IB2] * wl[IV1] + wr[IB2] * wr[IV1] - bx * (wl[IV2] + wr[IV2]);
     f.bz = wl[IB3] * wl[IV1] + wr[IB3] * wr[IV1] - bx * (wl[IV3] + wr[IV3]);
-    f.e = (el + wl[IPR] + ql) * wl[IV1] + (er + wr[IPR] + qr) * wr[IV1] -
+    f.e = (el + wl[IPR] + ql) * wl[IV1] +
+          (er + wr[IPR] + qr) * wr[IV1] -
           bx * (wl[IB2] * wl[IV2] + wl[IB3] * wl[IV3] +
-               wr[IB2] * wr[IV2] + wr[IB3] * wr[IV3]);
+                wr[IB2] * wr[IV2] + wr[IB3] * wr[IV3]);
 
     const Real a = fmax(fabs(wl[IV1]) + eos.FastMagnetosonicSpeed(
         wl[IDN], wl[IPR], wl[IB1], wl[IB2], wl[IB3]),
