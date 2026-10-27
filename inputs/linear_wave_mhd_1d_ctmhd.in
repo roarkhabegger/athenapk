@@ -1,0 +1,56 @@
+# AthenaPK - 1D MHD linear wave, constrained transport (first order)
+# Same setup as linear_wave_mhd_1d_glmmhd.in; compare the two at first order.
+
+<comment>
+problem = 1D MHD linear wave convergence (ctmhd)
+
+<job>
+problem_id = linear_wave_mhd
+
+<problem/linear_wave>
+compute_error = true  # when 'true' outputs L1 error compared to initial data
+wave_flag = 2         # MHD wave family (0 - 6)
+amp       = 1.0e-4    # wave amplitude
+vflow     = 0.0       # background flow velocity
+ang_2     = 0.0       # wavevector along x1 (1D)
+ang_3     = 0.0       # wavevector along x1 (1D)
+
+<parthenon/mesh>
+refinement = none
+nghost = 2
+
+nx1 = 128
+x1min = 0.0
+x1max = 1.0
+ix1_bc = periodic
+ox1_bc = periodic
+
+nx2 = 1
+x2min = -0.5
+x2max = 0.5
+ix2_bc = periodic
+ox2_bc = periodic
+
+nx3 = 1
+x3min = -0.5
+x3max = 0.5
+ix3_bc = periodic
+ox3_bc = periodic
+
+<parthenon/output0>
+file_type = hdf5
+dt = 0.01
+variables = prim
+
+<parthenon/time>
+integrator = rk1
+cfl = 0.4
+tlim = 1.0
+nlim = 10000
+
+<hydro>
+fluid = ctmhd
+eos = adiabatic
+riemann = llf
+reconstruction = dc
+gamma = 1.666666666666667 # gamma = C_p/C_v

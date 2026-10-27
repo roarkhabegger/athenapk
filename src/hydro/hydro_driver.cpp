@@ -451,6 +451,8 @@ TaskCollection HydroDriver::MakeTaskCollection(BlockList_t &blocks, int stage) {
 
   // First add split sources before the main time integration
   if (stage == 1) {
+    // Full-step dt for the ctmhd Gardiner-Stone weight, see "ct_dt" registration.
+    hydro_pkg->UpdateParam("ct_dt", tm.dt);
     // If any tasks modify the conserved variables before this place, then
     // the STS tasks should be updated to not assume prim and cons are in sync.
     const auto &diffint = hydro_pkg->Param<DiffInt>("diffint");

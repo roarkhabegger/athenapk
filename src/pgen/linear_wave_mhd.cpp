@@ -373,6 +373,9 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
   IndexRange ib = pmb->cellbounds.GetBoundsI(IndexDomain::interior);
   IndexRange jb = pmb->cellbounds.GetBoundsJ(IndexDomain::interior);
   IndexRange kb = pmb->cellbounds.GetBoundsK(IndexDomain::interior);
+  // Active-dimension switches for the vector-potential curl (1 if the direction has cells).
+  const int f2 = (pin->GetInteger("parthenon/mesh", "nx2") > 1) ? 1 : 0;
+  const int f3 = (pin->GetInteger("parthenon/mesh", "nx3") > 1) ? 1 : 0;
   // Initialize the magnetic fields.  Note wavevector, eigenvectors, and other variables
   // are set in InitUserMeshData
 
@@ -426,12 +429,14 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
         u(IM2, k, j, i) = mx * cos_a2 * sin_a3 + my * cos_a3 - mz * sin_a2 * sin_a3;
         u(IM3, k, j, i) = mx * sin_a2 + mz * cos_a2;
 
-        u(IB1, k, j, i) = (a3(k, j + 1, i) - a3(k, j - 1, i)) / coords.Dxc<2>(j) / 2.0 -
-                          (a2(k + 1, j, i) - a2(k - 1, j, i)) / coords.Dxc<3>(k) / 2.0;
-        u(IB2, k, j, i) = (a1(k + 1, j, i) - a1(k - 1, j, i)) / coords.Dxc<3>(k) / 2.0 -
+        // B = curl(A) by centered differences. Derivatives along a dimension of size one
+        // are dropped (f2/f3), so the 1D and 2D runs use only the active directions.
+        u(IB1, k, j, i) = f2 * (a3(k, j + 1, i) - a3(k, j - 1, i)) / coords.Dxc<2>(j) / 2.0 -
+                          f3 * (a2(k + 1, j, i) - a2(k - 1, j, i)) / coords.Dxc<3>(k) / 2.0;
+        u(IB2, k, j, i) = f3 * (a1(k + 1, j, i) - a1(k - 1, j, i)) / coords.Dxc<3>(k) / 2.0 -
                           (a3(k, j, i + 1) - a3(k, j, i - 1)) / coords.Dxc<1>(i) / 2.0;
         u(IB3, k, j, i) = (a2(k, j, i + 1) - a2(k, j, i - 1)) / coords.Dxc<1>(i) / 2.0 -
-                          (a1(k, j + 1, i) - a1(k, j - 1, i)) / coords.Dxc<2>(j) / 2.0;
+                          f2 * (a1(k, j + 1, i) - a1(k, j - 1, i)) / coords.Dxc<2>(j) / 2.0;
 
         u(IEN, k, j, i) = p0 / gm1 + 0.5 * d0 * u0 * u0 + amp * sn * rem[4][wave_flag];
         u(IEN, k, j, i) += 0.5 * (bx0 * bx0 + by0 * by0 + bz0 * bz0);

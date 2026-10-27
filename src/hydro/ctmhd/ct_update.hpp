@@ -72,108 +72,189 @@ inline TaskStatus SyncCTConservedMagneticField(MeshData<Real> *md) {
   return TaskStatus::complete;
 }
 
-// Gardiner-Stone 2007 (GS07) corner EMF combination
-// Combines face-centered EMFs computed by the Riemann solver using weights.
-// 
-// Scheme:
-// - Riemann solver outputs face-centered EMFs (E1, E2, E3) and weights (w_E1, w_E2, w_E3)
-// - Stored in ct_emf_weights field (6 components: [E1, E2, E3, w_E1, w_E2, w_E3])
-// - For each edge: weighted average of four surrounding face EMFs
-// - E_edge = (w1*E1 + w2*E2 + w3*E3 + w4*E4) / (w1 + w2 + w3 + w4)
-// 
-// Expects Riemann solver to populate:
-//   ct_emf_weights[0] = E1 face EMF (perpendicular to X1 face, in Y-Z plane)
-//   ct_emf_weights[1] = E2 face EMF (perpendicular to X2 face, in X-Z plane)
-//   ct_emf_weights[2] = E3 face EMF (perpendicular to X3 face, in X-Y plane)
-//   ct_emf_weights[3] = weight for E1 (from X1 mass flux)
-//   ct_emf_weights[4] = weight for E2 (from X2 mass flux)
-//   ct_emf_weights[5] = weight for E3 (from X3 mass flux)
+// Cell-centered EMF E = -(v x B) for component comp (0: E1, 1: E2, 2: E3), with B from
+// cons(IB*), which plays the role of Athena++ bcc. Same sign convention as
+// calculate_corner_e.cpp (Newtonian branch).
+template <typename P>
+KOKKOS_INLINE_FUNCTION Real CellCenteredEMF(const int comp, const P &prim, const P &cons,
+                                            const int b, const int k, const int j,
+                                            const int i) {
+  const Real vx = prim(b, IV1, k, j, i);
+  const Real vy = prim(b, IV2, k, j, i);
+  const Real vz = prim(b, IV3, k, j, i);
+  const Real bx = cons(b, IB1, k, j, i);
+  const Real by = cons(b, IB2, k, j, i);
+  const Real bz = cons(b, IB3, k, j, i);
+  if (comp == 0) return vz * by - vy * bz;
+  if (comp == 1) return vx * bz - vz * bx;
+  return vy * bx - vx * by;
+}
+
+// One weighted correction term from calculate_corner_e.cpp:
+//   (1 - w) * (face_a - cc_a) + w * (face_b - cc_b)
+KOKKOS_INLINE_FUNCTION Real WeightedCorrection(const Real w, const Real face_a,
+                                               const Real cc_a, const Real face_b,
+                                               const Real cc_b) {
+  return (1.0 - w) * (face_a - cc_a) + w * (face_b - cc_b);
+}
+
+// Gardiner-Stone (2007) corner EMF, 3D form of Athena++ calculate_corner_e.cpp.
+//
+// Each edge is 0.25 times the sum of four corrected terms: two face-EMF terms from each
+// perpendicular face, each corrected toward the cell-centered EMF with the upwind weights.
+// Inputs in ct_emf_weights (9 components per face, see the registration in hydro.cpp):
+//   x1 face: [E2 (0), E3 (1), w (2)]   x2 face: [E1 (3), E3 (4), w (5)]
+//   x3 face: [E1 (6), E2 (7), w (8)]
+// Output: flux<Edge>(dir) on ct_b, dir 1, 2, 3 for E1, E2, E3.
+//
+// Dimensions follow Athena++ calculate_corner_e.cpp:
+//   1D: every edge is copied from the face EMF that lies on it (no averaging).
+//   2D: E3 uses the corner average over x1 and x2 faces; E1 and E2 are copied from the
+//       x2 and x1 face EMFs, as the k-direction has no extent.
+//   3D: full four-correction stencil for E1, E2, E3.
 inline TaskStatus ComputeGardinerStoneEMFs(MeshData<Real> *md) {
   using TE = parthenon::TopologicalElement;
-  auto emf_wts = md->PackVariables(std::vector<std::string>{"ct_emf_weights"});
+  const int ndim = md->GetMeshPointer()->ndim;
+  auto wt = md->PackVariables(std::vector<std::string>{"ct_emf_weights"});
+  auto prim = md->PackVariables(std::vector<std::string>{"prim"});
+  auto cons = md->PackVariables(std::vector<std::string>{"cons"});
   auto face_b = md->PackVariablesAndFluxes(
       std::vector<parthenon::MetadataFlag>{Metadata::Independent, Metadata::Face});
-  const int ndim = md->GetMeshPointer()->ndim;
 
-  // E1 edge (Y-Z plane): weighted average of four surrounding face EMFs
-  // Combines EMF from X2 faces (j,j+1) and X3 faces (k,k+1)
-  const auto ib_e1 = md->GetBoundsI(parthenon::CellLevel::same, IndexDomain::interior, TE::E1);
-  const auto jb_e1 = md->GetBoundsJ(parthenon::CellLevel::same, IndexDomain::interior, TE::E1);
-  const auto kb_e1 = md->GetBoundsK(parthenon::CellLevel::same, IndexDomain::interior, TE::E1);
+  if (ndim == 1) {
+    // E2 and E3 on the x1 edges are the x1-face EMFs (slots 0 and 1), copied through.
+    const auto ib = md->GetBoundsI(parthenon::CellLevel::same, IndexDomain::interior, TE::E2);
+    const auto jb = md->GetBoundsJ(parthenon::CellLevel::same, IndexDomain::interior, TE::E2);
+    const auto kb = md->GetBoundsK(parthenon::CellLevel::same, IndexDomain::interior, TE::E2);
+    parthenon::par_for(
+        DEFAULT_LOOP_PATTERN, "GS07 1D copy E2/E3", parthenon::DevExecSpace(), 0,
+        wt.GetDim(5) - 1, kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
+        KOKKOS_LAMBDA(const int b, const int k, const int j, const int i) {
+          face_b(b).template flux<parthenon::TopologicalType::Edge>(2, 0, k, j, i) =
+              wt(b, 0, k, j, i);
+          face_b(b).template flux<parthenon::TopologicalType::Edge>(3, 0, k, j, i) =
+              wt(b, 1, k, j, i);
+        });
+    return TaskStatus::complete;
+  }
+
+  if (ndim == 2) {
+    // E1 and E2 do not vary in k, so they are copied from the face EMFs: E1 from the x2
+    // face (slot 3) and E2 from the x1 face (slot 0). E3 uses the x1/x2 corner average.
+    const auto ib1 = md->GetBoundsI(parthenon::CellLevel::same, IndexDomain::interior, TE::E1);
+    const auto jb1 = md->GetBoundsJ(parthenon::CellLevel::same, IndexDomain::interior, TE::E1);
+    const auto kb1 = md->GetBoundsK(parthenon::CellLevel::same, IndexDomain::interior, TE::E1);
+    parthenon::par_for(
+        DEFAULT_LOOP_PATTERN, "GS07 2D copy E1/E2", parthenon::DevExecSpace(), 0,
+        wt.GetDim(5) - 1, kb1.s, kb1.e, jb1.s, jb1.e, ib1.s, ib1.e,
+        KOKKOS_LAMBDA(const int b, const int k, const int j, const int i) {
+          face_b(b).template flux<parthenon::TopologicalType::Edge>(1, 0, k, j, i) =
+              wt(b, 3, k, j, i);
+          face_b(b).template flux<parthenon::TopologicalType::Edge>(2, 0, k, j, i) =
+              wt(b, 0, k, j, i);
+        });
+
+    const auto ib3 = md->GetBoundsI(parthenon::CellLevel::same, IndexDomain::interior, TE::E3);
+    const auto jb3 = md->GetBoundsJ(parthenon::CellLevel::same, IndexDomain::interior, TE::E3);
+    const auto kb3 = md->GetBoundsK(parthenon::CellLevel::same, IndexDomain::interior, TE::E3);
+    parthenon::par_for(
+        DEFAULT_LOOP_PATTERN, "GS07 2D corner E3", parthenon::DevExecSpace(), 0,
+        wt.GetDim(5) - 1, kb3.s, kb3.e, jb3.s, jb3.e, ib3.s, ib3.e,
+        KOKKOS_LAMBDA(const int b, const int k, const int j, const int i) {
+          const Real e3x1_j = wt(b, 1, k, j, i), e3x1_jm = wt(b, 1, k, j - 1, i);
+          const Real e3x2_i = wt(b, 4, k, j, i), e3x2_im = wt(b, 4, k, j, i - 1);
+          const Real w_x1_j = wt(b, 2, k, j, i), w_x1_jm = wt(b, 2, k, j - 1, i);
+          const Real w_x2_i = wt(b, 5, k, j, i), w_x2_im = wt(b, 5, k, j, i - 1);
+          const Real cc_j = CellCenteredEMF(2, prim, cons, b, k, j, i);
+          const Real cc_jm = CellCenteredEMF(2, prim, cons, b, k, j - 1, i);
+          const Real cc_i = CellCenteredEMF(2, prim, cons, b, k, j, i - 1);
+          const Real cc_jmi = CellCenteredEMF(2, prim, cons, b, k, j - 1, i - 1);
+          const Real de3_l2 = WeightedCorrection(w_x1_jm, e3x2_i, cc_jm, e3x2_im, cc_jmi);
+          const Real de3_r2 = WeightedCorrection(w_x1_j, e3x2_i, cc_j, e3x2_im, cc_i);
+          const Real de3_l1 = WeightedCorrection(w_x2_im, e3x1_j, cc_i, e3x1_jm, cc_jmi);
+          const Real de3_r1 = WeightedCorrection(w_x2_i, e3x1_j, cc_j, e3x1_jm, cc_jm);
+          face_b(b).template flux<parthenon::TopologicalType::Edge>(3, 0, k, j, i) =
+              0.25 * (de3_l1 + de3_r1 + de3_l2 + de3_r2 + e3x2_im + e3x2_i + e3x1_jm +
+                      e3x1_j);
+        });
+    return TaskStatus::complete;
+  }
+
+  // 3D: full four-correction stencil.
+  const auto ib = md->GetBoundsI(parthenon::CellLevel::same, IndexDomain::interior, TE::E1);
+  const auto jb = md->GetBoundsJ(parthenon::CellLevel::same, IndexDomain::interior, TE::E1);
+  const auto kb = md->GetBoundsK(parthenon::CellLevel::same, IndexDomain::interior, TE::E1);
+
+  // E1 (x1 edge). Face terms: x2 face E1 (slot 3, w slot 5), x3 face E1 (slot 6, w slot 8).
   parthenon::par_for(
-      DEFAULT_LOOP_PATTERN, "GS07 edge E1", parthenon::DevExecSpace(), 0,
-      emf_wts.GetDim(5) - 1, kb_e1.s, kb_e1.e, jb_e1.s, jb_e1.e, ib_e1.s, ib_e1.e,
+      DEFAULT_LOOP_PATTERN, "GS07 corner E1", parthenon::DevExecSpace(), 0,
+      wt.GetDim(5) - 1, kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
       KOKKOS_LAMBDA(const int b, const int k, const int j, const int i) {
-        // Four surrounding faces: (j,k), (j+1,k), (j,k+1), (j+1,k+1)
-        // E1 comes from X2 faces (j,j+1) and X3 faces (k,k+1)
-        const Real e1_jk = emf_wts(b, 0, k, j, i);      // E1 at (j,k)
-        const Real e1_jkp = emf_wts(b, 0, k + 1, j, i);  // E1 at (j,k+1)
-        const Real e1_jp = emf_wts(b, 0, k, j + 1, i);   // E1 at (j+1,k)
-        const Real e1_jkpp = emf_wts(b, 0, k + 1, j + 1, i); // E1 at (j+1,k+1)
-        
-        const Real w_jk = emf_wts(b, 3, k, j, i);      // weight at (j,k)
-        const Real w_jkp = emf_wts(b, 3, k + 1, j, i);
-        const Real w_jp = emf_wts(b, 3, k, j + 1, i);
-        const Real w_jkpp = emf_wts(b, 3, k + 1, j + 1, i);
-        
-        const Real w_sum = w_jk + w_jkp + w_jp + w_jkpp;
-        const Real e1_edge = (w_sum > 0.0) ? 
-            (w_jk * e1_jk + w_jkp * e1_jkp + w_jp * e1_jp + w_jkpp * e1_jkpp) / w_sum :
-            0.25 * (e1_jk + e1_jkp + e1_jp + e1_jkpp);
-        
-        face_b(b).template flux<parthenon::TopologicalType::Edge>(1, 0, k, j, i) = e1_edge;
+        const Real e1x2_k = wt(b, 3, k, j, i), e1x2_km = wt(b, 3, k - 1, j, i);
+        const Real e1x3_j = wt(b, 6, k, j, i), e1x3_jm = wt(b, 6, k, j - 1, i);
+        const Real w_x2_k = wt(b, 5, k, j, i), w_x2_km = wt(b, 5, k - 1, j, i);
+        const Real w_x3_j = wt(b, 8, k, j, i), w_x3_jm = wt(b, 8, k, j - 1, i);
+        const Real cc_k = CellCenteredEMF(0, prim, cons, b, k, j, i);
+        const Real cc_km = CellCenteredEMF(0, prim, cons, b, k - 1, j, i);
+        const Real cc_j = CellCenteredEMF(0, prim, cons, b, k, j - 1, i);
+        const Real cc_kmj = CellCenteredEMF(0, prim, cons, b, k - 1, j - 1, i);
+        const Real de1_l3 = WeightedCorrection(w_x2_km, e1x3_j, cc_km, e1x3_jm, cc_kmj);
+        const Real de1_r3 = WeightedCorrection(w_x2_k, e1x3_j, cc_k, e1x3_jm, cc_j);
+        const Real de1_l2 = WeightedCorrection(w_x3_jm, e1x2_k, cc_j, e1x2_km, cc_kmj);
+        const Real de1_r2 = WeightedCorrection(w_x3_j, e1x2_k, cc_k, e1x2_km, cc_km);
+        face_b(b).template flux<parthenon::TopologicalType::Edge>(1, 0, k, j, i) =
+            0.25 * (de1_l3 + de1_r3 + de1_l2 + de1_r2 + e1x2_km + e1x2_k + e1x3_jm +
+                    e1x3_j);
       });
 
-  // E2 edge (X-Z plane): weighted average using E2 values
-  const auto ib_e2 = md->GetBoundsI(parthenon::CellLevel::same, IndexDomain::interior, TE::E2);
-  const auto jb_e2 = md->GetBoundsJ(parthenon::CellLevel::same, IndexDomain::interior, TE::E2);
-  const auto kb_e2 = md->GetBoundsK(parthenon::CellLevel::same, IndexDomain::interior, TE::E2);
+  // E2 (x2 edge). Face terms: x1 face E2 (slot 0, w slot 2), x3 face E2 (slot 7, w slot 8).
+  const auto ib2 = md->GetBoundsI(parthenon::CellLevel::same, IndexDomain::interior, TE::E2);
+  const auto jb2 = md->GetBoundsJ(parthenon::CellLevel::same, IndexDomain::interior, TE::E2);
+  const auto kb2 = md->GetBoundsK(parthenon::CellLevel::same, IndexDomain::interior, TE::E2);
   parthenon::par_for(
-      DEFAULT_LOOP_PATTERN, "GS07 edge E2", parthenon::DevExecSpace(), 0,
-      emf_wts.GetDim(5) - 1, kb_e2.s, kb_e2.e, jb_e2.s, jb_e2.e, ib_e2.s, ib_e2.e,
+      DEFAULT_LOOP_PATTERN, "GS07 corner E2", parthenon::DevExecSpace(), 0,
+      wt.GetDim(5) - 1, kb2.s, kb2.e, jb2.s, jb2.e, ib2.s, ib2.e,
       KOKKOS_LAMBDA(const int b, const int k, const int j, const int i) {
-        const Real e2_ik = emf_wts(b, 1, k, j, i);
-        const Real e2_ikp = emf_wts(b, 1, k + 1, j, i);
-        const Real e2_ip = emf_wts(b, 1, k, j, i + 1);
-        const Real e2_ikpp = emf_wts(b, 1, k + 1, j, i + 1);
-        
-        const Real w_ik = emf_wts(b, 4, k, j, i);
-        const Real w_ikp = emf_wts(b, 4, k + 1, j, i);
-        const Real w_ip = emf_wts(b, 4, k, j, i + 1);
-        const Real w_ikpp = emf_wts(b, 4, k + 1, j, i + 1);
-        
-        const Real w_sum = w_ik + w_ikp + w_ip + w_ikpp;
-        const Real e2_edge = (w_sum > 0.0) ?
-            (w_ik * e2_ik + w_ikp * e2_ikp + w_ip * e2_ip + w_ikpp * e2_ikpp) / w_sum :
-            0.25 * (e2_ik + e2_ikp + e2_ip + e2_ikpp);
-        
-        face_b(b).template flux<parthenon::TopologicalType::Edge>(2, 0, k, j, i) = e2_edge;
+        const Real e2x1_k = wt(b, 0, k, j, i), e2x1_km = wt(b, 0, k - 1, j, i);
+        const Real e2x3_i = wt(b, 7, k, j, i), e2x3_im = wt(b, 7, k, j, i - 1);
+        const Real w_x1_k = wt(b, 2, k, j, i), w_x1_km = wt(b, 2, k - 1, j, i);
+        const Real w_x3_i = wt(b, 8, k, j, i), w_x3_im = wt(b, 8, k, j, i - 1);
+        const Real cc_k = CellCenteredEMF(1, prim, cons, b, k, j, i);
+        const Real cc_km = CellCenteredEMF(1, prim, cons, b, k - 1, j, i);
+        const Real cc_i = CellCenteredEMF(1, prim, cons, b, k, j, i - 1);
+        const Real cc_kmi = CellCenteredEMF(1, prim, cons, b, k - 1, j, i - 1);
+        const Real de2_l3 = WeightedCorrection(w_x1_km, e2x3_i, cc_km, e2x3_im, cc_kmi);
+        const Real de2_r3 = WeightedCorrection(w_x1_k, e2x3_i, cc_k, e2x3_im, cc_i);
+        const Real de2_l1 = WeightedCorrection(w_x3_im, e2x1_k, cc_i, e2x1_km, cc_kmi);
+        const Real de2_r1 = WeightedCorrection(w_x3_i, e2x1_k, cc_k, e2x1_km, cc_km);
+        face_b(b).template flux<parthenon::TopologicalType::Edge>(2, 0, k, j, i) =
+            0.25 * (de2_l3 + de2_r3 + de2_l1 + de2_r1 + e2x3_im + e2x3_i + e2x1_km +
+                    e2x1_k);
       });
 
-  // E3 edge (X-Y plane): weighted average using E3 values
-  const auto ib_e3 = md->GetBoundsI(parthenon::CellLevel::same, IndexDomain::interior, TE::E3);
-  const auto jb_e3 = md->GetBoundsJ(parthenon::CellLevel::same, IndexDomain::interior, TE::E3);
-  const auto kb_e3 = md->GetBoundsK(parthenon::CellLevel::same, IndexDomain::interior, TE::E3);
+  // E3 (x3 edge). Face terms: x1 face E3 (slot 1, w slot 2), x2 face E3 (slot 4, w slot 5).
+  const auto ib3 = md->GetBoundsI(parthenon::CellLevel::same, IndexDomain::interior, TE::E3);
+  const auto jb3 = md->GetBoundsJ(parthenon::CellLevel::same, IndexDomain::interior, TE::E3);
+  const auto kb3 = md->GetBoundsK(parthenon::CellLevel::same, IndexDomain::interior, TE::E3);
   parthenon::par_for(
-      DEFAULT_LOOP_PATTERN, "GS07 edge E3", parthenon::DevExecSpace(), 0,
-      emf_wts.GetDim(5) - 1, kb_e3.s, kb_e3.e, jb_e3.s, jb_e3.e, ib_e3.s, ib_e3.e,
+      DEFAULT_LOOP_PATTERN, "GS07 corner E3", parthenon::DevExecSpace(), 0,
+      wt.GetDim(5) - 1, kb3.s, kb3.e, jb3.s, jb3.e, ib3.s, ib3.e,
       KOKKOS_LAMBDA(const int b, const int k, const int j, const int i) {
-        const Real e3_ij = emf_wts(b, 2, k, j, i);
-        const Real e3_ijp = emf_wts(b, 2, k, j + 1, i);
-        const Real e3_ip = emf_wts(b, 2, k, j, i + 1);
-        const Real e3_ijpp = emf_wts(b, 2, k, j + 1, i + 1);
-        
-        const Real w_ij = emf_wts(b, 5, k, j, i);
-        const Real w_ijp = emf_wts(b, 5, k, j + 1, i);
-        const Real w_ip = emf_wts(b, 5, k, j, i + 1);
-        const Real w_ijpp = emf_wts(b, 5, k, j + 1, i + 1);
-        
-        const Real w_sum = w_ij + w_ijp + w_ip + w_ijpp;
-        const Real e3_edge = (w_sum > 0.0) ?
-            (w_ij * e3_ij + w_ijp * e3_ijp + w_ip * e3_ip + w_ijpp * e3_ijpp) / w_sum :
-            0.25 * (e3_ij + e3_ijp + e3_ip + e3_ijpp);
-        
-        face_b(b).template flux<parthenon::TopologicalType::Edge>(3, 0, k, j, i) = e3_edge;
+        const Real e3x1_j = wt(b, 1, k, j, i), e3x1_jm = wt(b, 1, k, j - 1, i);
+        const Real e3x2_i = wt(b, 4, k, j, i), e3x2_im = wt(b, 4, k, j, i - 1);
+        const Real w_x1_j = wt(b, 2, k, j, i), w_x1_jm = wt(b, 2, k, j - 1, i);
+        const Real w_x2_i = wt(b, 5, k, j, i), w_x2_im = wt(b, 5, k, j, i - 1);
+        const Real cc_j = CellCenteredEMF(2, prim, cons, b, k, j, i);
+        const Real cc_jm = CellCenteredEMF(2, prim, cons, b, k, j - 1, i);
+        const Real cc_i = CellCenteredEMF(2, prim, cons, b, k, j, i - 1);
+        const Real cc_jmi = CellCenteredEMF(2, prim, cons, b, k, j - 1, i - 1);
+        const Real de3_l2 = WeightedCorrection(w_x1_jm, e3x2_i, cc_jm, e3x2_im, cc_jmi);
+        const Real de3_r2 = WeightedCorrection(w_x1_j, e3x2_i, cc_j, e3x2_im, cc_i);
+        const Real de3_l1 = WeightedCorrection(w_x2_im, e3x1_j, cc_i, e3x1_jm, cc_jmi);
+        const Real de3_r1 = WeightedCorrection(w_x2_i, e3x1_j, cc_j, e3x1_jm, cc_jm);
+        face_b(b).template flux<parthenon::TopologicalType::Edge>(3, 0, k, j, i) =
+            0.25 * (de3_l1 + de3_r1 + de3_l2 + de3_r2 + e3x2_im + e3x2_i + e3x1_jm +
+                    e3x1_j);
       });
 
   return TaskStatus::complete;
